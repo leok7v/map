@@ -29,12 +29,10 @@ either expressed or implied, of the Kronos Project.
 */
 
 #include <strings.h> // for strlen()
+#include <stdint.h>  // int64_t
 
 /* Map implements simple hash table with trivial hashcode function and double linked
-   list collision resolution. It was initially implemented as a part of Modula-2 
-   compiler for Kronos workstation in 1983-1984. Original code can be found at:
-   https://github.com/leok7v/kronos/blob/master/excelsior/src/sys/util/mx/mxScan.m
-   This is result of a weekend project re-implementing it in C.  
+   list collision resolution.   
    Limitations: keys and values should not be null and should have >= 1 byte size.
    2GiB - 1 is maximum key or value size.
    Map stores copies of kays and values.
@@ -85,25 +83,23 @@ typedef struct map_entry_s {
 
 map_entry_t map_get(const map_t map, const void* key, int key_size);
 
-typedef void (*map_iterator_t)(void* that, const map_entry_t* e);
+typedef void (*map_iterator_t)(void* that, const map_t m, const map_entry_t* e);
 
 void map_iterate(const map_t map, void* that, map_iterator_t iterator);
 
-typedef long long map_i64_t;
+const char* map_get_str_str(const map_t map, const char* key);
+void map_put_str_str(const map_t map, const char* key, const char* val);
 
-inline const char* map_get_str_str(const map_t map, const char* key) { return (const char*)(map_get(map, key, (int)strlen(key) + 1).val); }
-inline void map_put_str_str(const map_t map, const char* key, const char* val) { map_put(map, key, (int)strlen(key) + 1, val, (int)strlen(val) + 1); }
+const int64_t* map_get_str_i64(const map_t map, const char* key);
+void map_put_str_i64(const map_t map, const char* key, int64_t val);
 
-inline const map_i64_t* map_get_str_i64(const map_t map, const char* key) { return (const map_i64_t*)(map_get(map, key, (int)strlen(key) + 1).val); }
-inline void map_put_str_i64(const map_t map, const char* key, map_i64_t val) { map_put(map, key, (int)strlen(key) + 1, &val, (int)sizeof(val)); }
+const char* map_get_i64_str(const map_t map, int64_t key);
+void map_put_i64_str(const map_t map, int64_t key, const char* val);
 
-inline const char* map_get_i64_str(const map_t map, map_i64_t key) { return (const char*)(map_get(map, &key, sizeof(key)).val); }
-inline void map_put_i64_str(const map_t map, map_i64_t key, const char* val) { map_put(map, &key, (int)sizeof(key), val, (int)strlen(val) + 1); }
+const int64_t* map_get_i64_i64(const map_t map, int64_t key);
+void map_put_i64_i64(const map_t map, int64_t key, int64_t val);
 
-inline const map_i64_t* map_get_i64_i64(const map_t map, map_i64_t key) { return (const map_i64_t*)(map_get(map, &key, (int)sizeof(key)).val); }
-inline void map_put_i64_i64(const map_t map, map_i64_t key, map_i64_t val) { map_put(map, &key, (int)sizeof(key), &val, (int)sizeof(val)); }
-
-inline const double* map_get_str_d(const map_t map, const char* key) { return (const double*)(map_get(map, key, (int)strlen(key) + 1).val); }
-inline void map_put_str_d(const map_t map, const char* key, double val) { map_put(map, key, (int)strlen(key) + 1, &val, (int)sizeof(val)); }
+const double* map_get_str_d(const map_t map, const char* key);
+void map_put_str_d(const map_t map, const char* key, double val);
 
 /* Note that: uintptr_t is castable to "long long"; more polymorphic accessors can be added to map_get/put if needed */

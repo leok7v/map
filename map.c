@@ -57,27 +57,25 @@ typedef struct entry_s {
 typedef struct map_s {
     int capacity;
     int size;
-    map_i64_t modification_count;
+    int64_t modification_count;
     map_heap_t* heap;
     entry_t* entries[1]; // [capacity]
 } **map_t;
 
-int map_hashcode(const void* key, const int key_size) {
-    int h = 5381;
+int map_hashcode(const void* key, const int key_size) { // joaat hash https://en.wikipedia.org/wiki/Jenkins_hash_function
+    int hash = 0;
     int n = key_size;
     const unsigned char* k = (const unsigned char*)key;
     while (n > 0) {
-        h = ((h << 5) + h) + *k++; /* hash * 33 + c */
+        hash += *k++;
+        hash += (hash << 10);
+        hash ^= (hash >> 6);
         n--;
     }
-    h ^= key_size; // Mummur3 finalization mix (fmix32): force all bits of a hash block to avalanche
-    h ^= h >> 16;
-    h *= 0x85ebca6b;
-    h ^= h >> 13;
-    h *= 0xc2b2ae35;
-    h ^= h >> 16;
-    h  = h & 0x7FFFFFFF;   // only positive
-    return h == 0 ? 1 : h; // never 0
+    hash += (hash << 3);
+    hash ^= (hash >> 11);
+    hash += (hash << 15);
+    return hash & 0x7FFFFFFF;
 }
 
 static inline int key_equal(const entry_t* e, const void* key, int key_size, int hash) {
@@ -85,7 +83,8 @@ static inline int key_equal(const entry_t* e, const void* key, int key_size, int
 }
 
 static const entry_t* get_entry(const struct map_s* m, int hash, const void* key, int key_size) {
-    const int ix = hash % m->capacity;
+    const int ix = hash & (m->capacity - 1);
+    assert(ix == hash % m->capacity);
     const entry_t* s = m->entries[ix];
     const entry_t* e = s;
     while (e != null) {
@@ -124,30 +123,48 @@ static void link_entry(struct map_s* m, int ix, entry_t* e) {
 
 static int resize_map(map_t map, int capacity) {
     struct map_s* m = *map;
+    assert((capacity & ~(capacity - 1)) == capacity);
+    assert((m->capacity & ~(m->capacity - 1)) == m->capacity);
+    assert(capacity != m->capacity);
     assert(MAP_MIN_CAPACITY <= capacity && m->size <= capacity * MAX_OCCUPANCY_PERCENTAGE / 100);
     int bytes = sizeof(struct map_s) + (capacity - 1) * sizeof(entry_t*);
     struct map_s* n = (struct map_s*)m->heap->allocate(m->heap,  bytes);
     if (n == null) { errno = ENOMEM; return -1; }
     memset(n, 0, bytes);
-    n->capacity = capacity;
     n->size = m->size;
     n->modification_count = m->modification_count;
     n->heap = m->heap;
     for (int i = 0; i < m->capacity; i++) {
         while (m->entries[i] != null) {
             entry_t* e = m->entries[i];
-            int ix = e->hash % capacity;
+            const int ix = e->hash & (capacity - 1);
+            assert(ix == e->hash % capacity);
             unlink_entry(m, i, e);
             link_entry(n, ix, e);
         }
     }
     n->heap->deallocate(n->heap, m);
+    n->capacity = capacity;
     *map = n; 
     return 0;
 }
 
+static int round_up_to_power2(int v) {
+    if (v > 0x3FFFFFFF) { return v; }
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v++;
+    return v;
+}
+
 map_t map_create_with_heap(int capacity, map_heap_t* heap) {
     assert(capacity >= 4);
+    capacity = round_up_to_power2(capacity);
+    assert((capacity & ~(capacity - 1)) == capacity);
     map_t map = (map_t)heap->allocate(heap,  sizeof(map_t));
     if (map == null) { return null; }
     int bytes = sizeof(struct map_s) + (capacity - 1) * sizeof(entry_t*);
@@ -217,8 +234,9 @@ map_entry_t map_get(const map_t map, const void* key, int key_size) {
 
 void map_remove(map_t map, const void* key, int key_size) {
     struct map_s* m = *map;
-    int hash = map_hashcode(key, key_size);
-    int ix = hash % m->capacity;
+    const int hash = map_hashcode(key, key_size);
+    const int ix = hash & (m->capacity - 1);
+    assert(ix == hash % m->capacity);
     entry_t* s = m->entries[ix];
     entry_t* e = s;
     while (e != null) {
@@ -242,12 +260,14 @@ void map_remove(map_t map, const void* key, int key_size) {
 int map_put(map_t map, const void* key, int key_size, const void* val, int val_size) {
     assert(key != null && key_size >= 1);
     assert(val != null && val_size >= 1);
-    if ((*map)->size >= (*map)->capacity * MAX_OCCUPANCY_PERCENTAGE / 100) {
-        if (resize_map(map, (*map)->capacity * 2) != 0) { return -1; }
+    const int c = (*map)->capacity;
+    if ((*map)->size >= c * MAX_OCCUPANCY_PERCENTAGE / 100) {
+        if (c >= 0x40000000 || resize_map(map, (*map)->capacity * 2) != 0) { return -1; }
     }
     struct map_s* m = *map;
-    int hash = map_hashcode(key, key_size);
-    int ix = hash % m->capacity;
+    const int hash = map_hashcode(key, key_size);
+    const int ix = hash & (m->capacity - 1);
+    assert(ix == hash % m->capacity);
     assert(m->size < m->capacity);
     entry_t* s = m->entries[ix];
     entry_t* e = s;
@@ -255,14 +275,12 @@ int map_put(map_t map, const void* key, int key_size, const void* val, int val_s
         entry_t* x = e->next;
         if (key_equal(e, key, key_size, hash)) {
             if (e->val_size != val_size) {
-                entry_t* kv = m->heap->allocate(m->heap,  sizeof(entry_t) - 1 + key_size + val_size);
+                entry_t* kv = m->heap->reallocate(m->heap, e, sizeof(entry_t) - 1 + key_size + val_size);
                 if (kv == null) { errno = ENOMEM; return -1; }
-                memcpy(kv, &e, sizeof(entry_t) - 1 + key_size);
                 memcpy(&(kv->kv) + key_size, val, val_size);
                 e->prev->next = kv;                
                 e->next->prev = kv;
                 if (m->entries[ix] == e) { m->entries[ix] = kv; }                
-                m->heap->deallocate(m->heap, e);
                 assert(kv->hash == hash);
             } else {
                 memcpy(&(e->kv) + key_size, val, val_size);
@@ -288,7 +306,7 @@ int map_put(map_t map, const void* key, int key_size, const void* val, int val_s
 
 void map_iterate(const map_t map, void* that, map_iterator_t iterator) {
     struct map_s* m = *map;
-    map_i64_t modification_count = m->modification_count;
+    int64_t modification_count = m->modification_count;
     for (int i = 0; i < m->capacity; i++) {
         entry_t* s = m->entries[i];
         entry_t* e = s;
@@ -299,10 +317,24 @@ void map_iterate(const map_t map, void* that, map_iterator_t iterator) {
             r.val = &e->kv + e->key_size;
             r.key_size = e->key_size;
             r.val_size = e->val_size;
-            iterator(that, &r);
+            iterator(that, map, &r);
             assert(m->modification_count == modification_count);
             e = n == s ? null : n;                    
         }
     }    
 }
 
+const char* map_get_str_str(const map_t map, const char* key) { return (const char*)(map_get(map, key, (int)strlen(key) + 1).val); }
+void map_put_str_str(const map_t map, const char* key, const char* val) { map_put(map, key, (int)strlen(key) + 1, val, (int)strlen(val) + 1); }
+
+const int64_t* map_get_str_i64(const map_t map, const char* key) { return (const int64_t*)(map_get(map, key, (int)strlen(key) + 1).val); }
+void map_put_str_i64(const map_t map, const char* key, int64_t val) { map_put(map, key, (int)strlen(key) + 1, &val, (int)sizeof(val)); }
+
+const char* map_get_i64_str(const map_t map, int64_t key) { return (const char*)(map_get(map, &key, sizeof(key)).val); }
+void map_put_i64_str(const map_t map, int64_t key, const char* val) { map_put(map, &key, (int)sizeof(key), val, (int)strlen(val) + 1); }
+
+const int64_t* map_get_i64_i64(const map_t map, int64_t key) { return (const int64_t*)(map_get(map, &key, (int)sizeof(key)).val); }
+void map_put_i64_i64(const map_t map, int64_t key, int64_t val) { map_put(map, &key, (int)sizeof(key), &val, (int)sizeof(val)); }
+
+const double* map_get_str_d(const map_t map, const char* key) { return (const double*)(map_get(map, key, (int)strlen(key) + 1).val); }
+void map_put_str_d(const map_t map, const char* key, double val) { map_put(map, key, (int)strlen(key) + 1, &val, (int)sizeof(val)); }
