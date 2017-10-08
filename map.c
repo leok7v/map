@@ -274,7 +274,7 @@ int map_put(map_t map, const void* key, int key_size, const void* val, int val_s
     while (e != null) {
         entry_t* x = e->next;
         if (key_equal(e, key, key_size, hash)) {
-            if (e->val_size != val_size) {
+            if (e->val_size > val_size) { // grow only; alternative !=
                 entry_t* kv = m->heap->reallocate(m->heap, e, sizeof(entry_t) - 1 + key_size + val_size);
                 if (kv == null) { errno = ENOMEM; return -1; }
                 memcpy(&(kv->kv) + key_size, val, val_size);
